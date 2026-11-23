@@ -62,6 +62,9 @@ def _isolate_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "DISCORD_TOKEN",
         "GUILD_ID",
         "DEV_GUILD_ID",
+        "DISCORD_PROXY",
+        "HTTPS_PROXY",
+        "https_proxy",
         "DATABASE_URL",
         "MARKET_OPEN",
         "MARKET_CLOSE",
@@ -118,6 +121,68 @@ def test_dev_guild_id_defaults_to_none_when_absent(tmp_path: Path) -> None:
     settings = _load_from_env_file(env_path)
 
     assert settings.dev_guild_id is None
+
+
+def test_discord_proxy_defaults_to_none_when_absent(tmp_path: Path) -> None:
+    """No proxy env set: the bot connects to Discord directly (the default)."""
+    env_path = tmp_path / ".env"
+    env_path.write_text("DISCORD_TOKEN=tmp-token\n", encoding="utf-8")
+
+    settings = _load_from_env_file(env_path)
+
+    assert settings.discord_proxy is None
+
+
+def test_discord_proxy_loads_from_explicit_env(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "DISCORD_TOKEN=tmp-token\nDISCORD_PROXY=http://proxy.example:3128\n",
+        encoding="utf-8",
+    )
+
+    settings = _load_from_env_file(env_path)
+
+    assert settings.discord_proxy == "http://proxy.example:3128"
+
+
+def test_discord_proxy_falls_back_to_https_proxy_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The conventional ``HTTPS_PROXY`` variable is honoured as a fallback.
+
+    Sandboxed/corporate hosts export ``HTTPS_PROXY`` and offer no direct
+    egress; discord.py ignores it unless the proxy is passed explicitly.
+    """
+    env_path = tmp_path / ".env"
+    env_path.write_text("DISCORD_TOKEN=tmp-token\n", encoding="utf-8")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:8080")
+
+    settings = _load_from_env_file(env_path)
+
+    assert settings.discord_proxy == "http://127.0.0.1:8080"
+
+
+def test_discord_proxy_explicit_env_wins_over_https_proxy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text("DISCORD_TOKEN=tmp-token\n", encoding="utf-8")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:8080")
+    monkeypatch.setenv("DISCORD_PROXY", "http://proxy.example:3128")
+
+    settings = _load_from_env_file(env_path)
+
+    assert settings.discord_proxy == "http://proxy.example:3128"
+
+
+def test_discord_proxy_blank_value_is_treated_as_unset(tmp_path: Path) -> None:
+    """``DISCORD_PROXY=`` (blank) must not reach aiohttp as an empty URL."""
+    env_path = tmp_path / ".env"
+    env_path.write_text("DISCORD_TOKEN=tmp-token\nDISCORD_PROXY=  \n", encoding="utf-8")
+
+    settings = _load_from_env_file(env_path)
+
+    assert settings.discord_proxy is None
 
 
 def test_legacy_guild_id_env_aliases_dev_guild_id(tmp_path: Path) -> None:

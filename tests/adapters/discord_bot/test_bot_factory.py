@@ -82,6 +82,29 @@ def test_build_bot_returns_commands_bot(
     assert isinstance(bot, commands.Bot)
 
 
+def test_build_bot_connects_directly_when_no_proxy_configured(
+    fake_sessionmaker: MagicMock,
+) -> None:
+    settings = Settings(discord_token=_VALID_TOKEN, discord_proxy=None)
+
+    bot = build_bot(settings, Container(settings, fake_sessionmaker))
+
+    assert bot.http.proxy is None
+
+
+def test_build_bot_routes_discord_traffic_through_configured_proxy(
+    fake_sessionmaker: MagicMock,
+) -> None:
+    """``settings.discord_proxy`` reaches discord.py's HTTP + gateway client."""
+    settings = Settings(
+        discord_token=_VALID_TOKEN, discord_proxy="http://127.0.0.1:8080"
+    )
+
+    bot = build_bot(settings, Container(settings, fake_sessionmaker))
+
+    assert bot.http.proxy == "http://127.0.0.1:8080"
+
+
 def test_build_bot_intents_are_explicit_and_omit_presences(
     settings: Settings, container: Container
 ) -> None:

@@ -84,6 +84,19 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("dev_guild_id", "guild_id"),
     )
+    # Optional HTTP(S) proxy for all Discord traffic (REST + gateway
+    # WebSocket).  discord.py never reads proxy environment variables on its
+    # own — it only uses a proxy handed to the client explicitly — so on hosts
+    # without direct egress (cloud dev sandboxes, corporate networks) the bot
+    # cannot resolve ``discord.com`` unless this is set.  ``DISCORD_PROXY``
+    # wins; the conventional ``HTTPS_PROXY`` is the fallback so such hosts
+    # work with no extra configuration.  Unset (the default, and the
+    # production case) means a direct connection.  A proxy URL may embed
+    # credentials: never log this value.
+    discord_proxy: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("discord_proxy", "https_proxy"),
+    )
 
     # Database
     database_url: str = "sqlite+aiosqlite:///data/friendex.db"
@@ -394,6 +407,18 @@ class Settings(BaseSettings):
                     value=token,
                 )
         return parsed
+
+    @field_validator("discord_proxy", mode="before")
+    @classmethod
+    def blank_proxy_is_unset(cls, v: object) -> object:
+        """Treat a blank proxy value (``DISCORD_PROXY=``) as "no proxy".
+
+        An empty string would otherwise reach aiohttp as an invalid proxy
+        URL and fail every Discord request at connect time.
+        """
+        if isinstance(v, str):
+            return v.strip() or None
+        return v
 
     @model_validator(mode="after")
     def validate_secrets(self) -> Settings:
