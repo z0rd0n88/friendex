@@ -42,8 +42,10 @@ if TYPE_CHECKING:
 
 _PLACEHOLDER_TOKEN = "your_bot_token_here"
 
-# Host the ambient-proxy bypass check (``NO_PROXY``) is evaluated against.
-_DISCORD_API_HOST = "discord.com"
+# Hosts the ambient-proxy bypass check (``NO_PROXY``) is evaluated against:
+# the REST API and the gateway WebSocket.  discord.py takes a single proxy for
+# both, so a bypass for either one sends all Discord traffic direct.
+_DISCORD_HOSTS = ("discord.com", "gateway.discord.gg")
 
 # Module-level structlog logger for validator diagnostics.  ``parse_int_list``
 # logs malformed env entries through this so a bad VC_PING_ROLE_IDS token does
@@ -95,7 +97,7 @@ def _ambient_https_proxy() -> str | None:
     proxy = proxies.get("https")
     if not proxy:
         return None
-    if urllib.request.proxy_bypass(_DISCORD_API_HOST):
+    if any(urllib.request.proxy_bypass(host) for host in _DISCORD_HOSTS):
         return None
     if not _is_http_proxy_url(proxy):
         # Never log the value: a proxy URL may embed credentials.
@@ -169,14 +171,22 @@ class Settings(BaseSettings):
     # 1. ``DISCORD_PROXY`` from the process env or ``.env`` always wins.  A
     #    blank value is an explicit opt-out that forces a direct connection.
     # 2. Otherwise the process-level ``HTTPS_PROXY`` is used, unless
-    #    ``NO_PROXY`` covers ``discord.com`` — so sandboxed hosts work with no
-    #    extra configuration (their proxy port can change per session, which
-    #    rules out a stored ``DISCORD_PROXY``).
+    #    ``NO_PROXY`` covers ``discord.com`` or ``gateway.discord.gg`` — so
+    #    sandboxed hosts work with no extra configuration (their proxy port
+    #    can change per session, which rules out a stored ``DISCORD_PROXY``).
     # 3. Otherwise the bot connects directly.
     #
     # ``SecretStr`` because a proxy URL may embed credentials; unwrap it once
     # at the consumer boundary (``build_bot``) and never log it.
     discord_proxy: SecretStr | None = None
+    # Where ``discord_proxy`` came from: ``"explicit"`` (``DISCORD_PROXY`` or
+    # a constructor argument), ``"ambient"`` (the ``HTTPS_PROXY`` fallback),
+    # or ``None`` for a direct connection.  Derived, never configured: the
+    # validators overwrite whatever a source supplies.  It exists so the boot
+    # log can say that an ambient proxy was picked up without logging its URL.
+    discord_proxy_source: Literal["explicit", "ambient"] | None = Field(
+        default=None, exclude=True
+    )
 
     # Database
     database_url: str = "sqlite+aiosqlite:///data/friendex.db"
@@ -511,10 +521,12 @@ class Settings(BaseSettings):
         alias = resolved.pop("discord_bot_token", None)
         if alias is not None and _token_is_unset(resolved.get("discord_token")):
             resolved["discord_token"] = alias
+        resolved["discord_proxy_source"] = "explicit"
         if "discord_proxy" not in resolved:
             ambient = _ambient_https_proxy()
             if ambient is not None:
                 resolved["discord_proxy"] = ambient
+                resolved["discord_proxy_source"] = "ambient"
         return resolved
 
     @field_validator("discord_proxy", mode="before")
@@ -541,6 +553,13 @@ class Settings(BaseSettings):
                 "DISCORD_PROXY must be an http:// or https:// URL with a host"
             )
         return v
+
+    @model_validator(mode="after")
+    def clear_proxy_source_without_proxy(self) -> Settings:
+        """A direct connection has no proxy source."""
+        if self.discord_proxy is None:
+            self.discord_proxy_source = None
+        return self
 
     @model_validator(mode="after")
     def validate_secrets(self) -> Settings:

@@ -327,15 +327,65 @@ def test_blank_dotenv_discord_proxy_opts_out_of_ambient_proxy(
     assert settings.discord_proxy is None
 
 
+@pytest.mark.parametrize(
+    "no_proxy",
+    ["localhost,discord.com", "gateway.discord.gg", "discord.gg", ".discord.gg"],
+)
 def test_no_proxy_for_discord_skips_ambient_https_proxy(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_proxy: str
 ) -> None:
+    """A bypass for the REST host or the gateway host sends everything direct."""
     monkeypatch.setenv("HTTPS_PROXY", "http://ambient.example:8080")
-    monkeypatch.setenv("NO_PROXY", "localhost,discord.com")
+    monkeypatch.setenv("NO_PROXY", no_proxy)
 
     settings = _load_from_env_file(_write_env(tmp_path, "DISCORD_TOKEN=tmp-token\n"))
 
     assert settings.discord_proxy is None
+    assert settings.discord_proxy_source is None
+
+
+def test_no_proxy_for_unrelated_host_keeps_ambient_https_proxy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "http://ambient.example:8080")
+    monkeypatch.setenv("NO_PROXY", "localhost,example.com")
+
+    settings = _load_from_env_file(_write_env(tmp_path, "DISCORD_TOKEN=tmp-token\n"))
+
+    assert settings.discord_proxy is not None
+    assert settings.discord_proxy_source == "ambient"
+
+
+def test_discord_proxy_source_is_explicit_for_discord_proxy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "http://ambient.example:8080")
+
+    settings = _load_from_env_file(
+        _write_env(
+            tmp_path, "DISCORD_TOKEN=tmp-token\nDISCORD_PROXY=http://explicit:3128\n"
+        )
+    )
+
+    assert settings.discord_proxy_source == "explicit"
+
+
+def test_discord_proxy_source_cannot_be_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The source is derived; an env value of that name is overwritten."""
+    monkeypatch.setenv("DISCORD_PROXY_SOURCE", "ambient")
+
+    direct = _load_from_env_file(_write_env(tmp_path, "DISCORD_TOKEN=tmp-token\n"))
+    explicit = _load_from_env_file(
+        _write_env(
+            tmp_path, "DISCORD_TOKEN=tmp-token\nDISCORD_PROXY=http://explicit:3128\n"
+        )
+    )
+
+    assert direct.discord_proxy_source is None
+    assert explicit.discord_proxy_source == "explicit"
+    assert "discord_proxy_source" not in explicit.model_dump()
 
 
 def test_ambient_non_http_proxy_is_ignored(
