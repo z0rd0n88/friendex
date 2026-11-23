@@ -18,10 +18,12 @@ configuration layer can be exercised in isolation.
 from __future__ import annotations
 
 import logging
+import urllib.request
 from datetime import time
 from decimal import Decimal
 from functools import lru_cache
 from typing import TYPE_CHECKING, Annotated, Any, Literal
+from urllib.parse import urlsplit
 
 import structlog
 from pydantic import (
@@ -40,10 +42,61 @@ if TYPE_CHECKING:
 
 _PLACEHOLDER_TOKEN = "your_bot_token_here"
 
+# Host the ambient-proxy bypass check (``NO_PROXY``) is evaluated against.
+_DISCORD_API_HOST = "discord.com"
+
 # Module-level structlog logger for validator diagnostics.  ``parse_int_list``
 # logs malformed env entries through this so a bad VC_PING_ROLE_IDS token does
 # not silently kill the list during boot.
 _log = structlog.get_logger(__name__)
+
+
+def _token_is_unset(value: object) -> bool:
+    """Return True when *value* carries no usable bot token.
+
+    ``None``, a blank/whitespace string, and the ``.env.example`` placeholder
+    all count as "not configured" — so a copied placeholder never shadows a
+    real token supplied under the other accepted name.
+    """
+    raw = value.get_secret_value() if isinstance(value, SecretStr) else value
+    if raw is None:
+        return True
+    return isinstance(raw, str) and raw.strip() in ("", _PLACEHOLDER_TOKEN)
+
+
+def _is_http_proxy_url(value: str) -> bool:
+    """Return True when *value* is an ``http(s)://host[:port]`` proxy URL.
+
+    aiohttp (and therefore discord.py) only supports HTTP proxies, so SOCKS
+    URLs and scheme-less ``host:port`` strings are rejected here rather than
+    failing later at connect time.
+    """
+    try:
+        parts = urlsplit(value)
+        return parts.scheme in ("http", "https") and bool(parts.hostname)
+    except ValueError:
+        return False
+
+
+def _ambient_https_proxy() -> str | None:
+    """Return the process-level HTTPS proxy that applies to Discord, if any.
+
+    Reads only the process environment (``HTTPS_PROXY`` / ``https_proxy``,
+    honouring ``NO_PROXY``) — never ``.env``, and never OS-level proxy
+    settings.  An ambient proxy aiohttp cannot use (e.g. SOCKS) is ignored so
+    it cannot break a host that reaches Discord directly today.
+    """
+    proxies = urllib.request.getproxies_environment()
+    proxy = proxies.get("https")
+    if not proxy:
+        return None
+    if urllib.request.proxy_bypass(_DISCORD_API_HOST):
+        return None
+    if not _is_http_proxy_url(proxy):
+        # Never log the value: a proxy URL may embed credentials.
+        _log.warning("ambient_https_proxy_ignored", reason="not_an_http_proxy_url")
+        return None
+    return proxy
 
 
 class Settings(BaseSettings):
@@ -60,6 +113,10 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
+        # Validation errors must never echo loaded values: the "token is
+        # missing" error would otherwise print every other input, including a
+        # proxy URL that may embed credentials.
+        hide_input_in_errors=True,
     )
 
     # Discord
@@ -81,11 +138,17 @@ class Settings(BaseSettings):
     # boundary (only ``main.py`` does this today) and never again.
     #
     # ``DISCORD_BOT_TOKEN`` is accepted as an alternative environment name
-    # (a common convention in other bots and hosting dashboards); the
-    # canonical ``DISCORD_TOKEN`` wins when both are set.
-    discord_token: SecretStr = Field(
-        validation_alias=AliasChoices("discord_token", "discord_bot_token"),
-    )
+    # (a common convention in other bots and hosting dashboards).  It is an
+    # input-only field: ``resolve_cross_source_inputs`` moves its value into
+    # ``discord_token`` and clears it, so the secret is held exactly once.
+    # The canonical ``DISCORD_TOKEN`` wins whenever it holds a real value —
+    # regardless of whether each name came from the process env or ``.env`` —
+    # so a stray exported alias can never swap the bot's identity.  (A plain
+    # ``AliasChoices`` cannot express this: pydantic-settings resolves an
+    # alias group per source, letting a process-env alias beat a ``.env``
+    # canonical name.)
+    discord_token: SecretStr
+    discord_bot_token: SecretStr | None = Field(default=None, repr=False, exclude=True)
     dev_guild_id: int | None = Field(
         default=None,
         validation_alias=AliasChoices("dev_guild_id", "guild_id"),
@@ -94,15 +157,21 @@ class Settings(BaseSettings):
     # WebSocket).  discord.py never reads proxy environment variables on its
     # own — it only uses a proxy handed to the client explicitly — so on hosts
     # without direct egress (cloud dev sandboxes, corporate networks) the bot
-    # cannot resolve ``discord.com`` unless this is set.  ``DISCORD_PROXY``
-    # wins; the conventional ``HTTPS_PROXY`` is the fallback so such hosts
-    # work with no extra configuration.  Unset (the default, and the
-    # production case) means a direct connection.  A proxy URL may embed
-    # credentials: never log this value.
-    discord_proxy: str | None = Field(
-        default=None,
-        validation_alias=AliasChoices("discord_proxy", "https_proxy"),
-    )
+    # cannot resolve ``discord.com`` unless this is set.
+    #
+    # Resolution (see ``resolve_cross_source_inputs``):
+    #
+    # 1. ``DISCORD_PROXY`` from the process env or ``.env`` always wins.  A
+    #    blank value is an explicit opt-out that forces a direct connection.
+    # 2. Otherwise the process-level ``HTTPS_PROXY`` is used, unless
+    #    ``NO_PROXY`` covers ``discord.com`` — so sandboxed hosts work with no
+    #    extra configuration (their proxy port can change per session, which
+    #    rules out a stored ``DISCORD_PROXY``).
+    # 3. Otherwise the bot connects directly.
+    #
+    # ``SecretStr`` because a proxy URL may embed credentials; unwrap it once
+    # at the consumer boundary (``build_bot``) and never log it.
+    discord_proxy: SecretStr | None = None
 
     # Database
     database_url: str = "sqlite+aiosqlite:///data/friendex.db"
@@ -414,6 +483,35 @@ class Settings(BaseSettings):
                 )
         return parsed
 
+    @model_validator(mode="before")
+    @classmethod
+    def resolve_cross_source_inputs(cls, data: Any) -> Any:
+        """Resolve the token alias and the ambient proxy fallback.
+
+        Runs on the merged input of every settings source, so precedence is
+        by *name* rather than by which source (process env vs ``.env``) a
+        value happened to come from:
+
+        * ``DISCORD_BOT_TOKEN`` fills ``discord_token`` only when the
+          canonical name is absent, blank, or the ``.env.example``
+          placeholder.  The alias is then dropped from the input.
+        * The process-level ``HTTPS_PROXY`` fills ``discord_proxy`` only when
+          no source supplied ``DISCORD_PROXY`` at all.  A blank
+          ``DISCORD_PROXY`` is present-but-empty, so it suppresses the
+          fallback (see ``blank_proxy_is_unset``).
+        """
+        if not isinstance(data, dict):
+            return data
+        resolved = dict(data)
+        alias = resolved.pop("discord_bot_token", None)
+        if alias is not None and _token_is_unset(resolved.get("discord_token")):
+            resolved["discord_token"] = alias
+        if "discord_proxy" not in resolved:
+            ambient = _ambient_https_proxy()
+            if ambient is not None:
+                resolved["discord_proxy"] = ambient
+        return resolved
+
     @field_validator("discord_proxy", mode="before")
     @classmethod
     def blank_proxy_is_unset(cls, v: object) -> object:
@@ -426,12 +524,26 @@ class Settings(BaseSettings):
             return v.strip() or None
         return v
 
+    @field_validator("discord_proxy", mode="after")
+    @classmethod
+    def require_http_proxy_url(cls, v: SecretStr | None) -> SecretStr | None:
+        """Reject a malformed proxy URL at boot instead of at login.
+
+        The message deliberately omits the value — it may embed credentials.
+        """
+        if v is not None and not _is_http_proxy_url(v.get_secret_value()):
+            raise ValueError(
+                "DISCORD_PROXY must be an http:// or https:// URL with a host"
+            )
+        return v
+
     @model_validator(mode="after")
     def validate_secrets(self) -> Settings:
-        """Reject empty / placeholder tokens at boot time."""
-        raw_token = self.discord_token.get_secret_value()
-        if raw_token in ("", _PLACEHOLDER_TOKEN):
-            raise ValueError("DISCORD_TOKEN is not configured")
+        """Reject empty / whitespace / placeholder tokens at boot time."""
+        if _token_is_unset(self.discord_token):
+            raise ValueError(
+                "DISCORD_TOKEN is not configured (DISCORD_BOT_TOKEN is also accepted)"
+            )
         return self
 
 
@@ -440,10 +552,12 @@ class Settings(BaseSettings):
 # DANGER — narrow contract:
 # This tuple is an **allow-list of key names**, NOT a content filter.  A raw
 # token bound under any key that is NOT listed here WILL leak verbatim to
-# the log sink.  The two watched keys are:
+# the log sink.  The watched keys are:
 #
 # * ``"discord_token"`` — the canonical :class:`Settings` field name.
+# * ``"discord_bot_token"`` — the accepted alternative name for the token.
 # * ``"token"`` — the generic alias used by callers outside this module.
+# * ``"discord_proxy"`` / ``"proxy"`` — a proxy URL may embed credentials.
 #
 # Sibling keys like ``bot_token``, ``auth_token``, ``api_key``, ``secret``,
 # ``password``, etc. are **NOT** scrubbed.  The intentional reliance on
@@ -459,7 +573,13 @@ class Settings(BaseSettings):
 # correct fix is to **either** bind the value under one of the watched
 # keys above, **or** extend this tuple — *not* to assume the redactor
 # will catch the leak.
-_REDACTED_KEYS: tuple[str, ...] = ("discord_token", "token")
+_REDACTED_KEYS: tuple[str, ...] = (
+    "discord_token",
+    "discord_bot_token",
+    "token",
+    "discord_proxy",
+    "proxy",
+)
 
 
 def redact_token(
@@ -477,6 +597,8 @@ def redact_token(
       never leaks.
     * ``"token"`` — kept for callers that bind the value under a generic
       key from outside the config module.
+    * ``"discord_bot_token"``, ``"discord_proxy"``, ``"proxy"`` — the token's
+      alternative name and the proxy URL (which may embed credentials).
 
     Any non-empty value under a watched key is replaced with the literal
     string ``"REDACTED"``.  :class:`~pydantic.SecretStr` already redacts
@@ -489,7 +611,7 @@ def redact_token(
        The watched-key contract is narrow — see the docstring on
        :data:`_REDACTED_KEYS` for the full DANGER note.  Raw tokens
        (the result of ``SecretStr.get_secret_value()``) bound under any
-       key other than ``"discord_token"`` or ``"token"`` will leak.
+       key not listed in :data:`_REDACTED_KEYS` will leak.
     """
     for key in _REDACTED_KEYS:
         value = event_dict.get(key)

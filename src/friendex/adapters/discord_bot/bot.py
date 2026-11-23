@@ -97,12 +97,20 @@ def build_bot(settings: Settings, container: Container) -> commands.Bot:
     intents.voice_states = True
     intents.reactions = True
     intents.guilds = True
+    # ``None`` (the default) is a direct connection. discord.py applies this
+    # one value to both its REST session and the gateway WebSocket. This is
+    # the single place the proxy ``SecretStr`` is unwrapped — never log it.
+    proxy = (
+        None
+        if settings.discord_proxy is None
+        else settings.discord_proxy.get_secret_value()
+    )
+    if proxy is not None:
+        _log.info("discord_proxy_enabled")
     bot = commands.Bot(
         command_prefix=commands.when_mentioned,
         intents=intents,
-        # ``None`` (the default) is a direct connection. discord.py applies
-        # this one value to both its REST session and the gateway WebSocket.
-        proxy=settings.discord_proxy,
+        proxy=proxy,
     )
 
     async def setup_hook() -> None:
