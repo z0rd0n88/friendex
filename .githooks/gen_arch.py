@@ -179,7 +179,11 @@ def existing_root_label(existing: str) -> str | None:
     if len(block_lines) < 3 or block_lines[1].strip() != "```":
         return None
     label = block_lines[2].strip().removesuffix("/")
-    return label or None
+    # A tree entry here means the root line was lost; adopting it would make
+    # the damage permanent, so fall back to the folder name instead.
+    if not label or label.startswith(("├", "└", "│")):
+        return None
+    return label
 
 
 def build_document(root: Path, existing: str | None) -> str:
