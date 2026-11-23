@@ -74,8 +74,9 @@ def build_bot(settings: Settings, container: Container) -> commands.Bot:
     ----------
     settings :
         Validated :class:`~friendex.adapters.config.Settings`. Used for
-        ``dev_guild_id`` (optional, dev-only) — the discord token itself is
-        passed to :meth:`Bot.start` by the entry point, not by this factory.
+        ``dev_guild_id`` (optional, dev-only) and ``discord_proxy``
+        (optional) — the discord token itself is passed to :meth:`Bot.start`
+        by the entry point, not by this factory.
     container :
         The Phase-13 :class:`~friendex.adapters.container.Container` whose
         cogs/listeners are registered and whose tasks are started.
@@ -96,9 +97,20 @@ def build_bot(settings: Settings, container: Container) -> commands.Bot:
     intents.voice_states = True
     intents.reactions = True
     intents.guilds = True
+    # ``None`` (the default) is a direct connection. discord.py applies this
+    # one value to both its REST session and the gateway WebSocket. This is
+    # the single place the proxy ``SecretStr`` is unwrapped — never log it.
+    proxy = (
+        None
+        if settings.discord_proxy is None
+        else settings.discord_proxy.get_secret_value()
+    )
+    if proxy is not None:
+        _log.info("discord_proxy_enabled")
     bot = commands.Bot(
         command_prefix=commands.when_mentioned,
         intents=intents,
+        proxy=proxy,
     )
 
     async def setup_hook() -> None:

@@ -27,7 +27,7 @@ uv run alembic upgrade head                      # create/migrate the database
 uv run friendex                                   # run the bot
 ```
 
-A `.env` with `DISCORD_TOKEN` is required (see `.env.example`). Slash commands sync **globally**, so the bot works in any server it is added to — there is no command prefix and no required home guild. `DEV_GUILD_ID` is optional: when set it also syncs commands instantly to that one guild for development. Each server is an isolated economy keyed by `(guild_id, user_id)` — see [ADR-0001](./docs/adr/0001-per-guild-markets.md).
+A `.env` with `DISCORD_TOKEN` is required (see `.env.example`; `DISCORD_BOT_TOKEN` is accepted as an alternative name). Slash commands sync **globally**, so the bot works in any server it is added to — there is no command prefix and no required home guild. `DEV_GUILD_ID` is optional: when set it also syncs commands instantly to that one guild for development. Each server is an isolated economy keyed by `(guild_id, user_id)` — see [ADR-0001](./docs/adr/0001-per-guild-markets.md).
 
 For full deployment instructions see [docs/deployment-guide.md](./docs/deployment-guide.md).
 
