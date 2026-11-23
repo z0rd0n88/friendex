@@ -69,6 +69,8 @@ Open `.env` in an editor and set values for your deployment.
 | --------------- | --------------------------------------------------- |
 | `DISCORD_TOKEN` | The bot token from step 1. Never commit this value. |
 
+`DISCORD_BOT_TOKEN` is accepted as an alternative name for the same value; `DISCORD_TOKEN` wins when both are set.
+
 ### Important optional variables
 
 | Variable                | Default                                | Description                                                                                                                                                                                    |

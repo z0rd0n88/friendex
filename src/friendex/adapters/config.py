@@ -79,7 +79,13 @@ class Settings(BaseSettings):
     # ``str(settings)``, and any default exception/log rendering.  Call
     # ``settings.discord_token.get_secret_value()`` once at the consumer
     # boundary (only ``main.py`` does this today) and never again.
-    discord_token: SecretStr
+    #
+    # ``DISCORD_BOT_TOKEN`` is accepted as an alternative environment name
+    # (a common convention in other bots and hosting dashboards); the
+    # canonical ``DISCORD_TOKEN`` wins when both are set.
+    discord_token: SecretStr = Field(
+        validation_alias=AliasChoices("discord_token", "discord_bot_token"),
+    )
     dev_guild_id: int | None = Field(
         default=None,
         validation_alias=AliasChoices("dev_guild_id", "guild_id"),

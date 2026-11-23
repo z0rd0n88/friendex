@@ -283,7 +283,7 @@ list.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DISCORD_TOKEN` | *(required)* | Bot token |
+| `DISCORD_TOKEN` | *(required)* | Bot token (`DISCORD_BOT_TOKEN` also accepted) |
 | `DEV_GUILD_ID` | unset | Instant command sync to one dev guild |
 | `DISCORD_PROXY` | unset (falls back to `HTTPS_PROXY`) | HTTP proxy for Discord traffic on hosts without direct egress |
 | `DATABASE_URL` | `sqlite+aiosqlite:///data/friendex.db` | Async SQLAlchemy URL |

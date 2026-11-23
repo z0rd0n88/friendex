@@ -60,6 +60,7 @@ def _isolate_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     for key in (
         "DISCORD_TOKEN",
+        "DISCORD_BOT_TOKEN",
         "GUILD_ID",
         "DEV_GUILD_ID",
         "DISCORD_PROXY",
@@ -121,6 +122,56 @@ def test_dev_guild_id_defaults_to_none_when_absent(tmp_path: Path) -> None:
     settings = _load_from_env_file(env_path)
 
     assert settings.dev_guild_id is None
+
+
+def test_discord_bot_token_env_aliases_discord_token(tmp_path: Path) -> None:
+    """``DISCORD_BOT_TOKEN`` is accepted as an alternative name for the token."""
+    env_path = tmp_path / ".env"
+    env_path.write_text("DISCORD_BOT_TOKEN=alias-token\n", encoding="utf-8")
+
+    settings = _load_from_env_file(env_path)
+
+    assert isinstance(settings.discord_token, SecretStr)
+    assert settings.discord_token.get_secret_value() == "alias-token"
+
+
+def test_discord_bot_token_alias_loads_from_process_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text("", encoding="utf-8")
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "alias-env-token")
+
+    settings = _load_from_env_file(env_path)
+
+    assert settings.discord_token.get_secret_value() == "alias-env-token"
+
+
+def test_discord_token_wins_over_discord_bot_token_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The canonical name takes precedence when both names are set."""
+    env_path = tmp_path / ".env"
+    env_path.write_text("", encoding="utf-8")
+    monkeypatch.setenv("DISCORD_TOKEN", "canonical-token")
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "alias-token")
+
+    settings = _load_from_env_file(env_path)
+
+    assert settings.discord_token.get_secret_value() == "canonical-token"
+
+
+def test_placeholder_under_discord_bot_token_alias_is_rejected(
+    tmp_path: Path,
+) -> None:
+    """The alias gets the same boot-time placeholder check as the canonical name."""
+    env_path = tmp_path / ".env"
+    env_path.write_text("DISCORD_BOT_TOKEN=your_bot_token_here\n", encoding="utf-8")
+
+    with pytest.raises(ValidationError) as excinfo:
+        _load_from_env_file(env_path)
+
+    assert "DISCORD_TOKEN is not configured" in str(excinfo.value)
 
 
 def test_discord_proxy_defaults_to_none_when_absent(tmp_path: Path) -> None:
