@@ -110,7 +110,12 @@ def test_build_bot_picks_up_ambient_https_proxy(
 ) -> None:
     """End to end: a host-exported ``HTTPS_PROXY`` reaches discord.py's client."""
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9090")
-    settings = Settings(discord_token=_VALID_TOKEN)
+    # ``_env_file=None``: a developer's local ``.env`` may set DISCORD_PROXY,
+    # which would (correctly) override the ambient proxy under test.
+    settings = Settings(
+        discord_token=_VALID_TOKEN,
+        _env_file=None,  # type: ignore[call-arg]
+    )
 
     bot = build_bot(settings, Container(settings, fake_sessionmaker))
 

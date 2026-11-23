@@ -349,6 +349,17 @@ def test_ambient_non_http_proxy_is_ignored(
     assert settings.discord_proxy is None
 
 
+def test_ambient_proxy_with_bad_port_is_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bad port must not reach aiohttp, whose error echoes the whole URL."""
+    monkeypatch.setenv("HTTPS_PROXY", "http://user:hunter2@ambient.example:99999")
+
+    settings = _load_from_env_file(_write_env(tmp_path, "DISCORD_TOKEN=tmp-token\n"))
+
+    assert settings.discord_proxy is None
+
+
 def test_https_proxy_in_dotenv_is_not_an_ambient_proxy(tmp_path: Path) -> None:
     """Only the process environment counts as ambient; ``.env`` uses DISCORD_PROXY."""
     settings = _load_from_env_file(
@@ -362,7 +373,14 @@ def test_https_proxy_in_dotenv_is_not_an_ambient_proxy(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "value",
-    ["127.0.0.1:8080", "socks5://proxy.example:1080", "http://:8080", "http://[bad"],
+    [
+        "127.0.0.1:8080",
+        "socks5://proxy.example:1080",
+        "http://:8080",
+        "http://[bad",
+        "http://user:hunter2@proxy.example:99999",
+        "http://user:hunter2@proxy.example:abc",
+    ],
 )
 def test_malformed_discord_proxy_is_rejected_at_boot(
     tmp_path: Path, value: str

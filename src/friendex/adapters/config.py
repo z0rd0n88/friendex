@@ -69,13 +69,18 @@ def _is_http_proxy_url(value: str) -> bool:
 
     aiohttp (and therefore discord.py) only supports HTTP proxies, so SOCKS
     URLs and scheme-less ``host:port`` strings are rejected here rather than
-    failing later at connect time.
+    failing later at connect time.  The port is checked too: aiohttp reports
+    a bad one with an ``InvalidURL`` whose message is the whole proxy URL,
+    embedded credentials included.
     """
     try:
         parts = urlsplit(value)
-        return parts.scheme in ("http", "https") and bool(parts.hostname)
+        # Reading ``port`` raises ValueError when it is non-numeric or out
+        # of range.
+        _ = parts.port
     except ValueError:
         return False
+    return parts.scheme in ("http", "https") and bool(parts.hostname)
 
 
 def _ambient_https_proxy() -> str | None:
