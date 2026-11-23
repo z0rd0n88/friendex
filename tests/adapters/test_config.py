@@ -344,6 +344,46 @@ def test_no_proxy_for_discord_skips_ambient_https_proxy(
     assert settings.discord_proxy_source is None
 
 
+def test_explicit_none_discord_proxy_argument_suppresses_ambient_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``Settings(discord_proxy=None)`` is an opt-out, like a blank env value."""
+    monkeypatch.setenv("HTTPS_PROXY", "http://ambient.example:8080")
+
+    settings = Settings(
+        discord_token="tmp-token",
+        discord_proxy=None,
+        _env_file=None,  # type: ignore[call-arg]
+    )
+
+    assert settings.discord_proxy is None
+    assert settings.discord_proxy_source is None
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_blank_secretstr_discord_proxy_argument_is_treated_as_unset(
+    blank: str,
+) -> None:
+    settings = Settings(
+        discord_token="tmp-token",
+        discord_proxy=SecretStr(blank),
+        _env_file=None,  # type: ignore[call-arg]
+    )
+
+    assert settings.discord_proxy is None
+
+
+def test_secretstr_discord_proxy_argument_is_stripped() -> None:
+    settings = Settings(
+        discord_token="tmp-token",
+        discord_proxy=SecretStr("  http://proxy.example:3128  "),
+        _env_file=None,  # type: ignore[call-arg]
+    )
+
+    assert settings.discord_proxy is not None
+    assert settings.discord_proxy.get_secret_value() == "http://proxy.example:3128"
+
+
 def test_no_proxy_for_unrelated_host_keeps_ambient_https_proxy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

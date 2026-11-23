@@ -535,10 +535,13 @@ class Settings(BaseSettings):
         """Treat a blank proxy value (``DISCORD_PROXY=``) as "no proxy".
 
         An empty string would otherwise reach aiohttp as an invalid proxy
-        URL and fail every Discord request at connect time.
+        URL and fail every Discord request at connect time.  A ``SecretStr``
+        passed to the constructor gets the same treatment as a plain string,
+        including having surrounding whitespace stripped.
         """
-        if isinstance(v, str):
-            return v.strip() or None
+        raw = v.get_secret_value() if isinstance(v, SecretStr) else v
+        if isinstance(raw, str):
+            return raw.strip() or None
         return v
 
     @field_validator("discord_proxy", mode="after")
