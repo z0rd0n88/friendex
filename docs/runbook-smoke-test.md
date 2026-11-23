@@ -21,7 +21,7 @@ following values exist:
 
 | Variable | Required | Notes |
 |---|---|---|
-| `DISCORD_TOKEN` | **yes** | Bot token; placeholder values (empty string or `your_bot_token_here`) are rejected by the `validate_secrets` model validator. |
+| `DISCORD_TOKEN` | **yes** | Bot token; placeholder values (empty string or `your_bot_token_here`) are rejected by the `validate_secrets` model validator. `DISCORD_BOT_TOKEN` is accepted as an alternative name; `DISCORD_TOKEN` wins when both hold a real value. |
 | `DEV_GUILD_ID` | optional | When set, the global command tree is also copied to that single guild and synced for instant availability. Production should leave this unset; the legacy `GUILD_ID` env name is still accepted as an alias. |
 
 All other tunables (market hours, activity-tick K, hedge-fund APY, etc.)

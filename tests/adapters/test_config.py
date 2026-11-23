@@ -60,6 +60,7 @@ def _isolate_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     for key in (
         "DISCORD_TOKEN",
+        "DISCORD_BOT_TOKEN",
         "GUILD_ID",
         "DEV_GUILD_ID",
         "DATABASE_URL",
@@ -118,6 +119,288 @@ def test_dev_guild_id_defaults_to_none_when_absent(tmp_path: Path) -> None:
     settings = _load_from_env_file(env_path)
 
     assert settings.dev_guild_id is None
+
+
+def _proxy_url(settings: Settings) -> str | None:
+    """Unwrap ``settings.discord_proxy`` (a ``SecretStr``) for assertions."""
+    proxy = settings.discord_proxy
+    return None if proxy is None else proxy.get_secret_value()
+
+
+def _write_env(tmp_path: Path, body: str) -> Path:
+    env_path = tmp_path / ".env"
+    env_path.write_text(body, encoding="utf-8")
+    return env_path
+
+
+# --- DISCORD_BOT_TOKEN alias -------------------------------------------------
+
+
+def test_discord_bot_token_env_aliases_discord_token(tmp_path: Path) -> None:
+    """``DISCORD_BOT_TOKEN`` is accepted as an alternative name for the token."""
+    settings = _load_from_env_file(
+        _write_env(tmp_path, "DISCORD_BOT_TOKEN=alias-token\n")
+    )
+
+    assert isinstance(settings.discord_token, SecretStr)
+    assert settings.discord_token.get_secret_value() == "alias-token"
+
+
+def test_discord_bot_token_alias_loads_from_process_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "alias-env-token")
+
+    settings = _load_from_env_file(_write_env(tmp_path, ""))
+
+    assert settings.discord_token.get_secret_value() == "alias-env-token"
+
+
+def test_discord_token_wins_over_discord_bot_token_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The canonical name takes precedence when both are in the process env."""
+    monkeypatch.setenv("DISCORD_TOKEN", "canonical-token")
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "alias-token")
+
+    settings = _load_from_env_file(_write_env(tmp_path, ""))
+
+    assert settings.discord_token.get_secret_value() == "canonical-token"
+
+
+def test_dotenv_discord_token_wins_over_process_env_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stray exported alias must not replace the token configured in ``.env``.
+
+    Otherwise a host that exports ``DISCORD_BOT_TOKEN`` for another bot would
+    silently make Friendex log in as that bot against this bot's database.
+    """
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "alias-from-process")
+
+    settings = _load_from_env_file(
+        _write_env(tmp_path, "DISCORD_TOKEN=canonical-from-dotenv\n")
+    )
+
+    assert settings.discord_token.get_secret_value() == "canonical-from-dotenv"
+
+
+def test_placeholder_discord_token_does_not_shadow_real_alias(tmp_path: Path) -> None:
+    """A copied ``.env.example`` placeholder must not block a real alias value."""
+    settings = _load_from_env_file(
+        _write_env(
+            tmp_path,
+            "DISCORD_TOKEN=your_bot_token_here\nDISCORD_BOT_TOKEN=real-alias-token\n",
+        )
+    )
+
+    assert settings.discord_token.get_secret_value() == "real-alias-token"
+
+
+def test_blank_discord_token_does_not_shadow_real_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DISCORD_TOKEN", "")
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "real-alias-token")
+
+    settings = _load_from_env_file(_write_env(tmp_path, ""))
+
+    assert settings.discord_token.get_secret_value() == "real-alias-token"
+
+
+def test_placeholder_under_discord_bot_token_alias_is_rejected(
+    tmp_path: Path,
+) -> None:
+    """The alias gets the same boot-time placeholder check as the canonical name."""
+    env_path = _write_env(tmp_path, "DISCORD_BOT_TOKEN=your_bot_token_here\n")
+
+    with pytest.raises(ValidationError) as excinfo:
+        _load_from_env_file(env_path)
+
+    assert "DISCORD_TOKEN is not configured" in str(excinfo.value)
+    assert "DISCORD_BOT_TOKEN" in str(excinfo.value)
+
+
+def test_whitespace_only_discord_token_is_rejected(tmp_path: Path) -> None:
+    env_path = _write_env(tmp_path, 'DISCORD_TOKEN="   "\n')
+
+    with pytest.raises(ValidationError) as excinfo:
+        _load_from_env_file(env_path)
+
+    assert "DISCORD_TOKEN is not configured" in str(excinfo.value)
+
+
+def test_alias_value_is_not_retained_as_a_second_copy(tmp_path: Path) -> None:
+    """The alias is input-only: the secret lives in ``discord_token`` alone."""
+    settings = _load_from_env_file(
+        _write_env(tmp_path, "DISCORD_BOT_TOKEN=alias-token\n")
+    )
+
+    assert settings.discord_bot_token is None
+    assert "alias-token" not in repr(settings)
+    assert "alias-token" not in str(settings.model_dump())
+
+
+# --- DISCORD_PROXY -----------------------------------------------------------
+
+
+def test_discord_proxy_defaults_to_none_when_absent(tmp_path: Path) -> None:
+    """No proxy configured anywhere: the bot connects to Discord directly."""
+    settings = _load_from_env_file(_write_env(tmp_path, "DISCORD_TOKEN=tmp-token\n"))
+
+    assert settings.discord_proxy is None
+
+
+def test_discord_proxy_loads_from_explicit_env(tmp_path: Path) -> None:
+    settings = _load_from_env_file(
+        _write_env(
+            tmp_path,
+            "DISCORD_TOKEN=tmp-token\nDISCORD_PROXY=http://proxy.example:3128\n",
+        )
+    )
+
+    assert _proxy_url(settings) == "http://proxy.example:3128"
+
+
+@pytest.mark.parametrize("name", ["HTTPS_PROXY", "https_proxy"])
+def test_discord_proxy_falls_back_to_ambient_https_proxy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """The conventional process-level ``HTTPS_PROXY`` is honoured as a fallback.
+
+    Sandboxed/corporate hosts export it and offer no direct egress; discord.py
+    ignores it unless the proxy is passed explicitly.
+    """
+    monkeypatch.setenv(name, "http://127.0.0.1:8080")
+
+    settings = _load_from_env_file(_write_env(tmp_path, "DISCORD_TOKEN=tmp-token\n"))
+
+    assert _proxy_url(settings) == "http://127.0.0.1:8080"
+
+
+def test_discord_proxy_explicit_env_wins_over_https_proxy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:8080")
+    monkeypatch.setenv("DISCORD_PROXY", "http://proxy.example:3128")
+
+    settings = _load_from_env_file(_write_env(tmp_path, "DISCORD_TOKEN=tmp-token\n"))
+
+    assert _proxy_url(settings) == "http://proxy.example:3128"
+
+
+def test_dotenv_discord_proxy_wins_over_ambient_https_proxy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``DISCORD_PROXY`` in ``.env`` beats an exported ``HTTPS_PROXY``."""
+    monkeypatch.setenv("HTTPS_PROXY", "http://ambient.example:8080")
+
+    settings = _load_from_env_file(
+        _write_env(
+            tmp_path,
+            "DISCORD_TOKEN=tmp-token\nDISCORD_PROXY=http://explicit.example:3128\n",
+        )
+    )
+
+    assert _proxy_url(settings) == "http://explicit.example:3128"
+
+
+def test_discord_proxy_blank_value_is_treated_as_unset(tmp_path: Path) -> None:
+    """``DISCORD_PROXY=`` (blank) must not reach aiohttp as an empty URL."""
+    settings = _load_from_env_file(
+        _write_env(tmp_path, "DISCORD_TOKEN=tmp-token\nDISCORD_PROXY=  \n")
+    )
+
+    assert settings.discord_proxy is None
+
+
+def test_blank_dotenv_discord_proxy_opts_out_of_ambient_proxy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A blank ``DISCORD_PROXY`` is the documented way to force a direct connection."""
+    monkeypatch.setenv("HTTPS_PROXY", "http://ambient.example:8080")
+
+    settings = _load_from_env_file(
+        _write_env(tmp_path, "DISCORD_TOKEN=tmp-token\nDISCORD_PROXY=\n")
+    )
+
+    assert settings.discord_proxy is None
+
+
+def test_no_proxy_for_discord_skips_ambient_https_proxy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "http://ambient.example:8080")
+    monkeypatch.setenv("NO_PROXY", "localhost,discord.com")
+
+    settings = _load_from_env_file(_write_env(tmp_path, "DISCORD_TOKEN=tmp-token\n"))
+
+    assert settings.discord_proxy is None
+
+
+def test_ambient_non_http_proxy_is_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """aiohttp only speaks HTTP proxies; an ambient SOCKS URL is not usable."""
+    monkeypatch.setenv("HTTPS_PROXY", "socks5://ambient.example:1080")
+
+    settings = _load_from_env_file(_write_env(tmp_path, "DISCORD_TOKEN=tmp-token\n"))
+
+    assert settings.discord_proxy is None
+
+
+def test_https_proxy_in_dotenv_is_not_an_ambient_proxy(tmp_path: Path) -> None:
+    """Only the process environment counts as ambient; ``.env`` uses DISCORD_PROXY."""
+    settings = _load_from_env_file(
+        _write_env(
+            tmp_path, "DISCORD_TOKEN=tmp-token\nHTTPS_PROXY=http://dotenv.example:1\n"
+        )
+    )
+
+    assert settings.discord_proxy is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["127.0.0.1:8080", "socks5://proxy.example:1080", "http://:8080", "http://[bad"],
+)
+def test_malformed_discord_proxy_is_rejected_at_boot(
+    tmp_path: Path, value: str
+) -> None:
+    """A bad proxy URL fails validation instead of failing later at login."""
+    env_path = _write_env(tmp_path, f"DISCORD_TOKEN=tmp-token\nDISCORD_PROXY={value}\n")
+
+    with pytest.raises(ValidationError) as excinfo:
+        _load_from_env_file(env_path)
+
+    assert "DISCORD_PROXY must be" in str(excinfo.value)
+    assert value not in str(excinfo.value)
+
+
+def test_settings_rendering_does_not_leak_proxy_credentials() -> None:
+    """A proxy URL can embed a password; it gets the same masking as the token."""
+    settings = Settings(
+        discord_token="tmp-token",
+        discord_proxy="http://user:hunter2@proxy.example:3128",
+    )
+
+    assert isinstance(settings.discord_proxy, SecretStr)
+    assert "hunter2" not in repr(settings)
+    assert "hunter2" not in str(settings)
+    assert "hunter2" not in str(settings.model_dump())
+
+
+def test_missing_token_error_does_not_echo_other_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The "token missing" error must not print the proxy URL it loaded."""
+    monkeypatch.setenv("HTTPS_PROXY", "http://user:hunter2@ambient.example:8080")
+
+    with pytest.raises(ValidationError) as excinfo:
+        _load_from_env_file(_write_env(tmp_path, ""))
+
+    assert "hunter2" not in str(excinfo.value)
+    assert "ambient.example" not in str(excinfo.value)
 
 
 def test_legacy_guild_id_env_aliases_dev_guild_id(tmp_path: Path) -> None:
@@ -643,6 +926,16 @@ def test_secret_str_str_renders_redacted() -> None:
 # ---------------------------------------------------------------------------
 # Wave 1 / fix/config-settings — redaction key fix (#84 M)
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("key", ["discord_bot_token", "discord_proxy", "proxy"])
+def test_redact_token_redacts_alias_and_proxy_keys(key: str) -> None:
+    """Keys a caller would naturally bind the token alias or proxy URL under."""
+    event = {"event": "boot", key: "should-be-redacted"}
+
+    out = redact_token(logger=None, method="info", event_dict=event)
+
+    assert out[key] == "REDACTED"
 
 
 def test_redact_token_redacts_discord_token_field() -> None:

@@ -69,12 +69,15 @@ Open `.env` in an editor and set values for your deployment.
 | --------------- | --------------------------------------------------- |
 | `DISCORD_TOKEN` | The bot token from step 1. Never commit this value. |
 
+`DISCORD_BOT_TOKEN` is accepted as an alternative name for the same value. A real `DISCORD_TOKEN` value wins when both are set, wherever each is defined (process environment or `.env`); an empty or placeholder `DISCORD_TOKEN` does not block the alias.
+
 ### Important optional variables
 
 | Variable                | Default                                | Description                                                                                                                                                                                    |
 | ----------------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `DATABASE_URL`          | `sqlite+aiosqlite:///data/friendex.db` | SQLAlchemy async URL for the database. The default creates `data/friendex.db` relative to the working directory.                                                                               |
 | `DEV_GUILD_ID`          | _(unset)_                              | Discord server ID. When set, slash commands are also synced instantly to this guild for faster iteration. Leave unset in production; global propagation takes up to 1 hour after first launch. |
+| `DISCORD_PROXY`         | _(unset)_                              | HTTP proxy URL (`http://` or `https://`; SOCKS is not supported) for all Discord traffic, REST and gateway. Only needed on hosts without direct internet egress, such as cloud dev sandboxes. When it is not defined at all, the bot uses the `HTTPS_PROXY` exported in the process environment, unless `NO_PROXY` covers `discord.com`; with neither it connects directly. Set it blank (`DISCORD_PROXY=`) to force a direct connection on a host that exports `HTTPS_PROXY`. |
 | `MARKET_OPEN`           | `06:30`                                | Market open time (24h UTC).                                                                                                                                                                    |
 | `MARKET_CLOSE`          | `04:30`                                | Market close time (24h UTC). The market spans overnight — open from 06:30 through 04:30 the following morning, Mon–Sat. Sunday is closed.                                                      |
 | `TIMEZONE_OFFSET_HOURS` | `0`                                    | UTC offset applied to market hour calculations.                                                                                                                                                |

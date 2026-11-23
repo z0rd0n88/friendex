@@ -283,8 +283,9 @@ list.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DISCORD_TOKEN` | *(required)* | Bot token |
+| `DISCORD_TOKEN` | *(required)* | Bot token (`DISCORD_BOT_TOKEN` also accepted) |
 | `DEV_GUILD_ID` | unset | Instant command sync to one dev guild |
+| `DISCORD_PROXY` | unset (falls back to the host's `HTTPS_PROXY`) | HTTP proxy for Discord traffic on hosts without direct egress; set blank to force a direct connection |
 | `DATABASE_URL` | `sqlite+aiosqlite:///data/friendex.db` | Async SQLAlchemy URL |
 | `MARKET_OPEN` / `MARKET_CLOSE` / `TIMEZONE_OFFSET_HOURS` | `06:30` / `04:30` / `0` | Market hours |
 | `INITIAL_CASH` / `INITIAL_PRICE` / `MIN_PRICE` | `10000` / `100` / `70` | Economy baseline |
