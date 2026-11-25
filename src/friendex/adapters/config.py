@@ -74,7 +74,14 @@ def _is_http_proxy_url(value: str) -> bool:
     failing later at connect time.  The port is checked too: aiohttp reports
     a bad one with an ``InvalidURL`` whose message is the whole proxy URL,
     embedded credentials included.
+
+    The URL must also be plain printable ASCII.  aiohttp fails on a host it
+    cannot IDNA-encode (e.g. a non-UTF-8 byte in the environment variable)
+    and on credentials outside latin-1, and those errors carry the URL or
+    the credentials too.  Unusual characters can be percent-encoded.
     """
+    if not (value.isascii() and value.isprintable()) or " " in value:
+        return False
     try:
         parts = urlsplit(value)
         # Reading ``port`` raises ValueError when it is non-numeric or out

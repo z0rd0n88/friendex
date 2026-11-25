@@ -450,6 +450,31 @@ def test_ambient_proxy_with_bad_port_is_ignored(
     assert settings.discord_proxy is None
 
 
+def test_discord_proxy_with_non_utf8_byte_from_process_env_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stray non-UTF-8 byte in the env var arrives as a lone surrogate."""
+    value = "http://user:hunter2@\udcff.example:3128"
+    monkeypatch.setenv("DISCORD_PROXY", value)
+
+    with pytest.raises(ValidationError) as excinfo:
+        _load_from_env_file(_write_env(tmp_path, "DISCORD_TOKEN=tmp-token\n"))
+
+    assert "DISCORD_PROXY must be" in str(excinfo.value)
+    assert "hunter2" not in str(excinfo.value)
+
+
+def test_ambient_proxy_with_non_ascii_host_is_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A host aiohttp cannot encode must not reach it: its error echoes the URL."""
+    monkeypatch.setenv("HTTPS_PROXY", "http://user:hunter2@\udcff.example:3128")
+
+    settings = _load_from_env_file(_write_env(tmp_path, "DISCORD_TOKEN=tmp-token\n"))
+
+    assert settings.discord_proxy is None
+
+
 def test_https_proxy_in_dotenv_is_not_an_ambient_proxy(tmp_path: Path) -> None:
     """Only the process environment counts as ambient; ``.env`` uses DISCORD_PROXY."""
     settings = _load_from_env_file(
@@ -470,6 +495,10 @@ def test_https_proxy_in_dotenv_is_not_an_ambient_proxy(tmp_path: Path) -> None:
         "http://[bad",
         "http://user:hunter2@proxy.example:99999",
         "http://user:hunter2@proxy.example:abc",
+        "http://user:hunter2@pröxy.example:3128",
+        "http://us\u2603r:hunter2@proxy.example:3128",
+        "http://user:hunter2@proxy.example:3128/\x00",
+        "http://user:hunter2@proxy .example:3128",
     ],
 )
 def test_malformed_discord_proxy_is_rejected_at_boot(
