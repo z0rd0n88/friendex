@@ -426,6 +426,22 @@ def test_discord_proxy_source_cannot_be_configured(
     assert direct.discord_proxy_source is None
     assert explicit.discord_proxy_source == "explicit"
     assert "discord_proxy_source" not in explicit.model_dump()
+    assert "discord_proxy_source" not in Settings.model_fields
+
+
+def test_discord_proxy_source_argument_is_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A constructor argument cannot relabel an ambient proxy as explicit."""
+    monkeypatch.setenv("HTTPS_PROXY", "http://ambient.example:8080")
+
+    settings = Settings(
+        discord_token="tmp-token",
+        discord_proxy_source="explicit",  # type: ignore[call-arg]
+        _env_file=None,
+    )
+
+    assert settings.discord_proxy_source == "ambient"
 
 
 def test_ambient_non_http_proxy_is_ignored(
