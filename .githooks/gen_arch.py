@@ -178,21 +178,30 @@ def existing_root_label(existing: str) -> str | None:
     # Layout: marker remainder, opening fence, then "<label>/".
     if len(block_lines) < 3 or block_lines[1].strip() != "```":
         return None
-    label = block_lines[2].strip().removesuffix("/")
-    # A tree entry here means the root line was lost; adopting it would make
-    # the damage permanent, so fall back to the folder name instead.
-    if not label or label.startswith(("├", "└", "│")):
+    line = block_lines[2].strip()
+    label = line.removesuffix("/")
+    # Accept only the form this script writes: one folder name followed by a
+    # single "/".  Anything else (a tree entry because the root line was lost,
+    # a bare file name, a trailing description) is hand damage; adopting it
+    # would make the damage permanent, so fall back to the folder name.
+    if (
+        not line.endswith("/")
+        or not label
+        or "/" in label
+        or " — " in label
+        or label.startswith(("├", "└", "│"))
+    ):
         return None
     return label
 
 
 def build_document(root: Path, existing: str | None) -> str:
-    # Derive the repo name from the main worktree, not root.name: in a linked
-    # worktree root.name is the worktree folder (e.g. "feat-foo"), which makes
-    # every branch produce a different ARCH.md root label and causes merge conflicts.
-    # An existing map's label wins over both: the checkout folder's name (and
-    # its case) differs between clones, which would otherwise flip the label
-    # back and forth in unrelated commits.
+    # The label already in ARCH.md wins: the checkout folder's name (and its
+    # case) differs between clones, which would otherwise flip the label back
+    # and forth in unrelated commits.
+    # Only when there is no usable label, derive one — from the main worktree,
+    # not root.name: in a linked worktree root.name is the worktree folder
+    # (e.g. "feat-foo"), which would give every branch a different label.
     repo = existing_root_label(existing or "")
     if repo is None:
         try:
