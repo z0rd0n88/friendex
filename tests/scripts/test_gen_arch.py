@@ -94,3 +94,30 @@ def test_existing_root_label_reads_the_committed_label() -> None:
     document = f"# ARCH\n\n{gen_arch.TREE_START}\n```\nfriendex/\n└── a.py\n```\n"
 
     assert gen_arch.existing_root_label(document) == "friendex"
+
+
+@pytest.mark.parametrize(
+    "label_line",
+    [
+        "README.md",
+        "|-- README.md",
+        "friendex/  — the bot",
+        "a/b/",
+        "/",
+    ],
+)
+def test_hand_damaged_label_line_is_not_adopted(
+    tmp_path: Path, label_line: str
+) -> None:
+    """Only the form the generator writes — ``<name>/`` — counts as a label."""
+    root = _make_repo(tmp_path, "SomeProject")
+    damaged = f"# ARCH\n\n{gen_arch.TREE_START}\n```\n{label_line}\n└── a.py\n```\n"
+
+    assert gen_arch.existing_root_label(damaged) is None
+    assert _root_label(gen_arch.build_document(root, damaged)) == "SomeProject/"
+
+
+def test_root_label_with_a_space_is_kept() -> None:
+    document = f"# ARCH\n\n{gen_arch.TREE_START}\n```\nMy Project/\n└── a.py\n```\n"
+
+    assert gen_arch.existing_root_label(document) == "My Project"
