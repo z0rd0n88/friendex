@@ -170,15 +170,36 @@ def default_scaffold(repo: str, top_level: list[Node]) -> str:
     )
 
 
+def existing_root_label(existing: str) -> str | None:
+    """Return the root label of the tree block already in *existing*, if any."""
+    if TREE_START not in existing:
+        return None
+    block_lines = existing.split(TREE_START, 1)[1].splitlines()
+    # Layout: marker remainder, opening fence, then "<label>/".
+    if len(block_lines) < 3 or block_lines[1].strip() != "```":
+        return None
+    label = block_lines[2].strip().removesuffix("/")
+    # A tree entry here means the root line was lost; adopting it would make
+    # the damage permanent, so fall back to the folder name instead.
+    if not label or label.startswith(("├", "└", "│")):
+        return None
+    return label
+
+
 def build_document(root: Path, existing: str | None) -> str:
     # Derive the repo name from the main worktree, not root.name: in a linked
     # worktree root.name is the worktree folder (e.g. "feat-foo"), which makes
     # every branch produce a different ARCH.md root label and causes merge conflicts.
-    try:
-        common = sh(["git", "rev-parse", "--git-common-dir"], root).strip()
-        repo = (root / common).resolve().parent.name
-    except subprocess.CalledProcessError:
-        repo = root.name
+    # An existing map's label wins over both: the checkout folder's name (and
+    # its case) differs between clones, which would otherwise flip the label
+    # back and forth in unrelated commits.
+    repo = existing_root_label(existing or "")
+    if repo is None:
+        try:
+            common = sh(["git", "rev-parse", "--git-common-dir"], root).strip()
+            repo = (root / common).resolve().parent.name
+        except subprocess.CalledProcessError:
+            repo = root.name
     paths = list_paths(root)
     tree = build_tree(paths)
     descs = parse_descs(existing or "")
