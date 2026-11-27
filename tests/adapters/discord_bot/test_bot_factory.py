@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
+import structlog
 from discord.ext import commands
 
 from friendex.adapters.config import Settings
@@ -110,11 +111,58 @@ def test_build_bot_picks_up_ambient_https_proxy(
 ) -> None:
     """End to end: a host-exported ``HTTPS_PROXY`` reaches discord.py's client."""
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9090")
-    settings = Settings(discord_token=_VALID_TOKEN)
+    # ``_env_file=None``: a developer's local ``.env`` may set DISCORD_PROXY,
+    # which would (correctly) override the ambient proxy under test.
+    settings = Settings(
+        discord_token=_VALID_TOKEN,
+        _env_file=None,  # type: ignore[call-arg]
+    )
 
     bot = build_bot(settings, Container(settings, fake_sessionmaker))
 
     assert bot.http.proxy == "http://127.0.0.1:9090"
+
+
+@pytest.mark.parametrize(
+    ("ambient", "explicit", "expected_source"),
+    [
+        ("http://127.0.0.1:9090", None, "ambient"),
+        ("http://127.0.0.1:9090", "http://user:hunter2@127.0.0.1:8080", "explicit"),
+    ],
+)
+def test_build_bot_logs_proxy_source_but_never_the_url(
+    fake_sessionmaker: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+    ambient: str,
+    explicit: str | None,
+    expected_source: str,
+) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", ambient)
+    if explicit is not None:
+        monkeypatch.setenv("DISCORD_PROXY", explicit)
+    settings = Settings(
+        discord_token=_VALID_TOKEN,
+        _env_file=None,  # type: ignore[call-arg]
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        build_bot(settings, Container(settings, fake_sessionmaker))
+
+    enabled = [entry for entry in logs if entry["event"] == "discord_proxy_enabled"]
+    assert [entry["source"] for entry in enabled] == [expected_source]
+    assert "127.0.0.1" not in str(logs)
+    assert "hunter2" not in str(logs)
+
+
+def test_build_bot_logs_nothing_about_a_proxy_when_direct(
+    fake_sessionmaker: MagicMock,
+) -> None:
+    settings = Settings(discord_token=_VALID_TOKEN, discord_proxy=None)
+
+    with structlog.testing.capture_logs() as logs:
+        build_bot(settings, Container(settings, fake_sessionmaker))
+
+    assert not [entry for entry in logs if entry["event"] == "discord_proxy_enabled"]
 
 
 def test_build_bot_intents_are_explicit_and_omit_presences(

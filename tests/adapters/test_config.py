@@ -327,15 +327,121 @@ def test_blank_dotenv_discord_proxy_opts_out_of_ambient_proxy(
     assert settings.discord_proxy is None
 
 
+@pytest.mark.parametrize(
+    "no_proxy",
+    ["localhost,discord.com", "gateway.discord.gg", "discord.gg", ".discord.gg"],
+)
 def test_no_proxy_for_discord_skips_ambient_https_proxy(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_proxy: str
 ) -> None:
+    """A bypass for the REST host or the gateway host sends everything direct."""
     monkeypatch.setenv("HTTPS_PROXY", "http://ambient.example:8080")
-    monkeypatch.setenv("NO_PROXY", "localhost,discord.com")
+    monkeypatch.setenv("NO_PROXY", no_proxy)
 
     settings = _load_from_env_file(_write_env(tmp_path, "DISCORD_TOKEN=tmp-token\n"))
 
     assert settings.discord_proxy is None
+    assert settings.discord_proxy_source is None
+
+
+def test_explicit_none_discord_proxy_argument_suppresses_ambient_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``Settings(discord_proxy=None)`` is an opt-out, like a blank env value."""
+    monkeypatch.setenv("HTTPS_PROXY", "http://ambient.example:8080")
+
+    settings = Settings(
+        discord_token="tmp-token",
+        discord_proxy=None,
+        _env_file=None,  # type: ignore[call-arg]
+    )
+
+    assert settings.discord_proxy is None
+    assert settings.discord_proxy_source is None
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_blank_secretstr_discord_proxy_argument_is_treated_as_unset(
+    blank: str,
+) -> None:
+    settings = Settings(
+        discord_token="tmp-token",
+        discord_proxy=SecretStr(blank),
+        _env_file=None,  # type: ignore[call-arg]
+    )
+
+    assert settings.discord_proxy is None
+
+
+def test_secretstr_discord_proxy_argument_is_stripped() -> None:
+    settings = Settings(
+        discord_token="tmp-token",
+        discord_proxy=SecretStr("  http://proxy.example:3128  "),
+        _env_file=None,  # type: ignore[call-arg]
+    )
+
+    assert settings.discord_proxy is not None
+    assert settings.discord_proxy.get_secret_value() == "http://proxy.example:3128"
+
+
+def test_no_proxy_for_unrelated_host_keeps_ambient_https_proxy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "http://ambient.example:8080")
+    monkeypatch.setenv("NO_PROXY", "localhost,example.com")
+
+    settings = _load_from_env_file(_write_env(tmp_path, "DISCORD_TOKEN=tmp-token\n"))
+
+    assert settings.discord_proxy is not None
+    assert settings.discord_proxy_source == "ambient"
+
+
+def test_discord_proxy_source_is_explicit_for_discord_proxy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "http://ambient.example:8080")
+
+    settings = _load_from_env_file(
+        _write_env(
+            tmp_path, "DISCORD_TOKEN=tmp-token\nDISCORD_PROXY=http://explicit:3128\n"
+        )
+    )
+
+    assert settings.discord_proxy_source == "explicit"
+
+
+def test_discord_proxy_source_cannot_be_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The source is derived; an env value of that name is overwritten."""
+    monkeypatch.setenv("DISCORD_PROXY_SOURCE", "ambient")
+
+    direct = _load_from_env_file(_write_env(tmp_path, "DISCORD_TOKEN=tmp-token\n"))
+    explicit = _load_from_env_file(
+        _write_env(
+            tmp_path, "DISCORD_TOKEN=tmp-token\nDISCORD_PROXY=http://explicit:3128\n"
+        )
+    )
+
+    assert direct.discord_proxy_source is None
+    assert explicit.discord_proxy_source == "explicit"
+    assert "discord_proxy_source" not in explicit.model_dump()
+    assert "discord_proxy_source" not in Settings.model_fields
+
+
+def test_discord_proxy_source_argument_is_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A constructor argument cannot relabel an ambient proxy as explicit."""
+    monkeypatch.setenv("HTTPS_PROXY", "http://ambient.example:8080")
+
+    settings = Settings(
+        discord_token="tmp-token",
+        discord_proxy_source="explicit",  # type: ignore[call-arg]
+        _env_file=None,
+    )
+
+    assert settings.discord_proxy_source == "ambient"
 
 
 def test_ambient_non_http_proxy_is_ignored(
@@ -343,6 +449,42 @@ def test_ambient_non_http_proxy_is_ignored(
 ) -> None:
     """aiohttp only speaks HTTP proxies; an ambient SOCKS URL is not usable."""
     monkeypatch.setenv("HTTPS_PROXY", "socks5://ambient.example:1080")
+
+    settings = _load_from_env_file(_write_env(tmp_path, "DISCORD_TOKEN=tmp-token\n"))
+
+    assert settings.discord_proxy is None
+
+
+def test_ambient_proxy_with_bad_port_is_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bad port must not reach aiohttp, whose error echoes the whole URL."""
+    monkeypatch.setenv("HTTPS_PROXY", "http://user:hunter2@ambient.example:99999")
+
+    settings = _load_from_env_file(_write_env(tmp_path, "DISCORD_TOKEN=tmp-token\n"))
+
+    assert settings.discord_proxy is None
+
+
+def test_discord_proxy_with_non_utf8_byte_from_process_env_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stray non-UTF-8 byte in the env var arrives as a lone surrogate."""
+    value = "http://user:hunter2@\udcff.example:3128"
+    monkeypatch.setenv("DISCORD_PROXY", value)
+
+    with pytest.raises(ValidationError) as excinfo:
+        _load_from_env_file(_write_env(tmp_path, "DISCORD_TOKEN=tmp-token\n"))
+
+    assert "DISCORD_PROXY must be" in str(excinfo.value)
+    assert "hunter2" not in str(excinfo.value)
+
+
+def test_ambient_proxy_with_non_ascii_host_is_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A host aiohttp cannot encode must not reach it: its error echoes the URL."""
+    monkeypatch.setenv("HTTPS_PROXY", "http://user:hunter2@\udcff.example:3128")
 
     settings = _load_from_env_file(_write_env(tmp_path, "DISCORD_TOKEN=tmp-token\n"))
 
@@ -362,7 +504,18 @@ def test_https_proxy_in_dotenv_is_not_an_ambient_proxy(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "value",
-    ["127.0.0.1:8080", "socks5://proxy.example:1080", "http://:8080", "http://[bad"],
+    [
+        "127.0.0.1:8080",
+        "socks5://proxy.example:1080",
+        "http://:8080",
+        "http://[bad",
+        "http://user:hunter2@proxy.example:99999",
+        "http://user:hunter2@proxy.example:abc",
+        "http://user:hunter2@pröxy.example:3128",
+        "http://us\u2603r:hunter2@proxy.example:3128",
+        "http://user:hunter2@proxy.example:3128/\x00",
+        "http://user:hunter2@proxy .example:3128",
+    ],
 )
 def test_malformed_discord_proxy_is_rejected_at_boot(
     tmp_path: Path, value: str

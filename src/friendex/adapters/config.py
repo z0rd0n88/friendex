@@ -29,6 +29,8 @@ import structlog
 from pydantic import (
     AliasChoices,
     Field,
+    ModelWrapValidatorHandler,
+    PrivateAttr,
     SecretStr,
     ValidationInfo,
     computed_field,
@@ -42,8 +44,10 @@ if TYPE_CHECKING:
 
 _PLACEHOLDER_TOKEN = "your_bot_token_here"
 
-# Host the ambient-proxy bypass check (``NO_PROXY``) is evaluated against.
-_DISCORD_API_HOST = "discord.com"
+# Hosts the ambient-proxy bypass check (``NO_PROXY``) is evaluated against:
+# the REST API and the gateway WebSocket.  discord.py takes a single proxy for
+# both, so a bypass for either one sends all Discord traffic direct.
+_DISCORD_HOSTS = ("discord.com", "gateway.discord.gg")
 
 # Module-level structlog logger for validator diagnostics.  ``parse_int_list``
 # logs malformed env entries through this so a bad VC_PING_ROLE_IDS token does
@@ -69,13 +73,25 @@ def _is_http_proxy_url(value: str) -> bool:
 
     aiohttp (and therefore discord.py) only supports HTTP proxies, so SOCKS
     URLs and scheme-less ``host:port`` strings are rejected here rather than
-    failing later at connect time.
+    failing later at connect time.  The port is checked too: aiohttp reports
+    a bad one with an ``InvalidURL`` whose message is the whole proxy URL,
+    embedded credentials included.
+
+    The URL must also be plain printable ASCII.  aiohttp fails on a host it
+    cannot IDNA-encode (e.g. a non-UTF-8 byte in the environment variable)
+    and on credentials outside latin-1, and those errors carry the URL or
+    the credentials too.  Unusual characters can be percent-encoded.
     """
+    if not (value.isascii() and value.isprintable()) or " " in value:
+        return False
     try:
         parts = urlsplit(value)
-        return parts.scheme in ("http", "https") and bool(parts.hostname)
+        # Reading ``port`` raises ValueError when it is non-numeric or out
+        # of range.
+        _ = parts.port
     except ValueError:
         return False
+    return parts.scheme in ("http", "https") and bool(parts.hostname)
 
 
 def _ambient_https_proxy() -> str | None:
@@ -90,7 +106,7 @@ def _ambient_https_proxy() -> str | None:
     proxy = proxies.get("https")
     if not proxy:
         return None
-    if urllib.request.proxy_bypass(_DISCORD_API_HOST):
+    if any(urllib.request.proxy_bypass(host) for host in _DISCORD_HOSTS):
         return None
     if not _is_http_proxy_url(proxy):
         # Never log the value: a proxy URL may embed credentials.
@@ -164,14 +180,21 @@ class Settings(BaseSettings):
     # 1. ``DISCORD_PROXY`` from the process env or ``.env`` always wins.  A
     #    blank value is an explicit opt-out that forces a direct connection.
     # 2. Otherwise the process-level ``HTTPS_PROXY`` is used, unless
-    #    ``NO_PROXY`` covers ``discord.com`` — so sandboxed hosts work with no
-    #    extra configuration (their proxy port can change per session, which
-    #    rules out a stored ``DISCORD_PROXY``).
+    #    ``NO_PROXY`` covers ``discord.com`` or ``gateway.discord.gg`` — so
+    #    sandboxed hosts work with no extra configuration (their proxy port
+    #    can change per session, which rules out a stored ``DISCORD_PROXY``).
     # 3. Otherwise the bot connects directly.
     #
     # ``SecretStr`` because a proxy URL may embed credentials; unwrap it once
     # at the consumer boundary (``build_bot``) and never log it.
     discord_proxy: SecretStr | None = None
+    # Where ``discord_proxy`` came from — see the ``discord_proxy_source``
+    # property.  A private attribute, not a field: it is derived state, so no
+    # settings source or constructor argument can set it and it never appears
+    # in a dump.  ``track_proxy_source`` records it at construction.
+    _discord_proxy_source: Literal["explicit", "ambient"] | None = PrivateAttr(
+        default=None
+    )
 
     # Database
     database_url: str = "sqlite+aiosqlite:///data/friendex.db"
@@ -512,16 +535,41 @@ class Settings(BaseSettings):
                 resolved["discord_proxy"] = ambient
         return resolved
 
+    @model_validator(mode="wrap")
+    @classmethod
+    def track_proxy_source(
+        cls, data: Any, handler: ModelWrapValidatorHandler[Settings]
+    ) -> Settings:
+        """Record whether the proxy was configured or picked up from the host.
+
+        Runs outside ``resolve_cross_source_inputs``, so *data* is still the
+        raw merged input: a ``discord_proxy`` key in it means the value was
+        supplied explicitly, and a proxy on the validated instance without
+        that key can only be the ambient ``HTTPS_PROXY`` fallback.
+        """
+        settings = handler(data)
+        if isinstance(data, dict):
+            if settings.discord_proxy is None:
+                settings._discord_proxy_source = None
+            elif "discord_proxy" in data:
+                settings._discord_proxy_source = "explicit"
+            else:
+                settings._discord_proxy_source = "ambient"
+        return settings
+
     @field_validator("discord_proxy", mode="before")
     @classmethod
     def blank_proxy_is_unset(cls, v: object) -> object:
         """Treat a blank proxy value (``DISCORD_PROXY=``) as "no proxy".
 
         An empty string would otherwise reach aiohttp as an invalid proxy
-        URL and fail every Discord request at connect time.
+        URL and fail every Discord request at connect time.  A ``SecretStr``
+        passed to the constructor gets the same treatment as a plain string,
+        including having surrounding whitespace stripped.
         """
-        if isinstance(v, str):
-            return v.strip() or None
+        raw = v.get_secret_value() if isinstance(v, SecretStr) else v
+        if isinstance(raw, str):
+            return raw.strip() or None
         return v
 
     @field_validator("discord_proxy", mode="after")
@@ -536,6 +584,17 @@ class Settings(BaseSettings):
                 "DISCORD_PROXY must be an http:// or https:// URL with a host"
             )
         return v
+
+    @property
+    def discord_proxy_source(self) -> Literal["explicit", "ambient"] | None:
+        """Where ``discord_proxy`` came from, for the boot log.
+
+        ``"explicit"`` (``DISCORD_PROXY`` or a constructor argument),
+        ``"ambient"`` (the ``HTTPS_PROXY`` fallback), or ``None`` for a direct
+        connection.  Recorded when the instance is constructed; it is not
+        recomputed by ``model_copy(update=...)``.
+        """
+        return self._discord_proxy_source
 
     @model_validator(mode="after")
     def validate_secrets(self) -> Settings:

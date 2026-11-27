@@ -106,7 +106,9 @@ def build_bot(settings: Settings, container: Container) -> commands.Bot:
         else settings.discord_proxy.get_secret_value()
     )
     if proxy is not None:
-        _log.info("discord_proxy_enabled")
+        # The source only: an unexpected ambient proxy should be visible in
+        # the boot log, but the URL may embed credentials.
+        _log.info("discord_proxy_enabled", source=settings.discord_proxy_source)
     bot = commands.Bot(
         command_prefix=commands.when_mentioned,
         intents=intents,
